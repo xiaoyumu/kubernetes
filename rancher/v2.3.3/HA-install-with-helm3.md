@@ -223,7 +223,7 @@ kubectl get all -A
 确认 cluster 已正常运行后可以继续后面的步骤. 注意上面的 ```export KUBECONFIG=``` 命令只是临时使用，重新打开控制台会话将需要重新设置．
 
 ## 下载, 配置和部署 cert manager
-通过 helm 可以在线安装 cert-manager, 但由于其镜像由于网络限制可能无法直接拉取，所以需要先下载 chart 包，然后基于 chart 包生成含有私仓镜像路径的 kubectl 部署文件．
+通过 helm 可以在线安装 cert-manager, 但如果其镜像由于网络限制无法直接拉取，可以先先下载 chart 包，然后基于 chart 包生成含有私仓镜像路径的 kubectl 部署文件．
 执行下面的命令获取 cert manager chart 包，这里我们使用 v0.9.1 版本，经测试与 rancher 2.3.3 工作正常．更低或者更高的版本可能出现部署错误．
 
 ```shell
