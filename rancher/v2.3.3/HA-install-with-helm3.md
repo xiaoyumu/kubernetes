@@ -4,6 +4,7 @@ Rancher  HA 安装手册 (v2.3.3)
 这篇手册详细介绍如何在内网环境(Air gapped / Offline)中安装 HA (高可用) 模式的 Rancher Cluster. 在开始前请确保已经部署了内网镜像仓库 (推荐使用[harbor](https://github.com/goharbor/harbor)).
 
 本手册使用的相关软件包版本如下:
+
 * rke (1.0.0)
 * kubernetes (1.16.3)
 * kubectl (1.16.3)
@@ -15,6 +16,7 @@ Rancher  HA 安装手册 (v2.3.3)
 基本步骤包括:
 
 * 准备节点(物理机/虚拟机)
+* 准备Load Balancer
 * 配置节点, 安装软件
 * 准备相关工具
 * 准备相关镜像并push到内网镜像仓库中
@@ -27,12 +29,74 @@ Rancher  HA 安装手册 (v2.3.3)
 本手册使用下面的节点来部署, 请根据实际情况自行调整.
 
 ```plaintext
-192.168.1.71 k8s-master-01
-192.168.1.72 k8s-master-02
-192.168.1.73 k8s-master-03
+192.168.1.21 k8s-demo-01
+192.168.1.22 k8s-demo-02
+192.168.1.23 k8s-demo-03
+192.168.1.20 k8s-demo-lb-01
+192.168.1.20 k8s-demo.fshome.net
 ```
 
 为确保各节点可以互相访问, 将节点和对应的 IP 添加到 ```/etc/hosts ``` 中
+
+# 准备Load Balancer
+
+这里我们参考 rancher HA 部署的官方最小结构配置一个 nginx 实例来 LB 请求到后端的 k8s 节点.
+
+如下图所示:
+
+```k8s-demo-lb-01``` (192.168.1.20) 是一台部署有 docker 的 VM, 用于运行 nginx 容器. 在 ```k8s-demo-lb-01``` 上创建 nginx 配置文件.
+
+```shell
+sudo mkdir -p /data/rke-k8s-ha/
+sudo vi /data/rke-k8s-ha/nginx.conf
+```
+
+填入下面的内容
+
+```conf
+worker_processes 4;
+worker_rlimit_nofile 40000;
+
+events {
+    worker_connections 8192;
+}
+
+stream {
+    upstream rancher_servers_http {
+        least_conn;
+        server k8s-demo-01:80 max_fails=3 fail_timeout=5s;
+        server k8s-demo-02:80 max_fails=3 fail_timeout=5s;
+        server k8s-demo-03:80 max_fails=3 fail_timeout=5s;
+    }
+    server {
+        listen     80;
+        proxy_pass rancher_servers_http;
+    }
+
+    upstream rancher_servers_https {
+        least_conn;
+        server k8s-demo-01:443 max_fails=3 fail_timeout=5s;
+        server k8s-demo-02:443 max_fails=3 fail_timeout=5s;
+        server k8s-demo-03:443 max_fails=3 fail_timeout=5s;
+    }
+    server {
+        listen     443;
+        proxy_pass rancher_servers_https;
+    }
+}
+```
+
+启动 nginx 容器
+
+```shell
+docker run -d \
+  --restart always \
+  --name rke-k8s-nginx \
+  -p 80:80 \
+  -p 443:443 \
+  -v /data/rke-k8s-ha/nginx.conf:/etc/nginx/nginx.conf:ro \
+  nginx:1.15.11
+```
 
 # 配置节点, 安装软件
 
@@ -48,26 +112,26 @@ Rancher  HA 安装手册 (v2.3.3)
 * 确保这个账号有 sudo 权限
 * 将这个账号加入 docker 组
 
-然后在执行部署的节点上生成并复制 ssh 公钥到所有节点, 以确保执行部署的节点可以无需密码访问所有节点. 例如这里选则  ```k8s-master-01``` 作为部署节点.
+然后在执行部署的节点上生成并复制 ssh 公钥到所有节点, 以确保执行部署的节点可以无需密码访问所有节点. 例如这里选则  ```k8s-demo-01``` 作为部署节点.
 
 ```shell
 # 生成 ssh key
 ssh-keygen -t rsa
 
 # 复制到所有节点
-ssh-copy-id -i ~/.ssh/id_rsa.pub user_name@k8s-master-01
-ssh-copy-id -i ~/.ssh/id_rsa.pub user_name@k8s-master-02
-ssh-copy-id -i ~/.ssh/id_rsa.pub user_name@k8s-master-03
+ssh-copy-id -i ~/.ssh/id_rsa.pub user_name@k8s-demo-01
+ssh-copy-id -i ~/.ssh/id_rsa.pub user_name@k8s-demo-02
+ssh-copy-id -i ~/.ssh/id_rsa.pub user_name@k8s-demo-03
 
 # 完成后可以通过ssh命令测试,正常情况下能直接登录不再提示输入密码
-ssh user_name@k8s-master-01
-ssh user_name@k8s-master-02
-ssh user_name@k8s-master-03
+ssh user_name@k8s-demo-01
+ssh user_name@k8s-demo-02
+ssh user_name@k8s-demo-03
 ```
 
 # 准备相关工具
 
-下载下列工具到执行部署的节点上 (```k8s-master-01```)
+下载下列工具到执行部署的节点上 (```k8s-demo-01```)
 
 * rke (1.0.0)
 * kubectl (1.16.3)
@@ -75,13 +139,13 @@ ssh user_name@k8s-master-03
 
 ```sh
 # Download and install RKE tool https://github.com/rancher/rke/releases/tag/v1.0.0
-curl -L -o  rke_linux-amd64 \
+curl -L -o rke_linux-amd64 \
     https://github.com/rancher/rke/releases/download/v1.0.0/rke_linux-amd64
 chmod +x rke_linux-amd64
 sudo mv rke_linux-amd64 /usr/local/bin/rke
 
 # Download and install kubectl
-curl -L -o  kubectl-v1.16.3 \
+curl -L -o kubectl-v1.16.3 \
     https://storage.googleapis.com/kubernetes-release/release/v1.16.3/bin/linux/amd64/kubectl
 chmod +x kubectl-v1.16.3
 sudo mv kubectl-v1.16.3 /usr/local/bin/kubectl
@@ -114,10 +178,13 @@ curl -L -o FILENAME URL --socks5 PROXY_IP:PORT
 
 # 创建 RKE k8s Cluster 配置, 部署 k8s Cluster
 
-RKE 工具使用一个 cluster yaml 文件了来指导部署 k8s cluster, 下面是本例中的 cluster 配置文件, 更多配置可以参考 Rancher [官网示例](https://rancher.com/docs/rke/latest/en/example-yamls/).
+RKE 工具使用一个 cluster yaml 文件了来指导部署 k8s cluster, 下面是本例中的 cluster 配置文件, 更多配置可以参考 Rancher [官网示例](https://rancher.com/docs/rke/latest/en/example-yamls/). 
 
-```yaml
-cluster_name: rancher-cluster
+注意将下面的 ```<user_name>``` 替换为提前准备好的用户名.
+
+```shell
+tee ./rke-cluster-2.3.3.yml <<-'EOF'
+cluster_name: k8s-demo-cluster
 
 private_registries:
   - url: hub.fshome.net/library
@@ -128,19 +195,19 @@ private_registries:
 kubernetes_version: v1.16.3-rancher1-1
 
 nodes:
-  - address: 192.168.1.71
-    hostname_override: k8s-master-01
-    user: user_name
+  - address: 192.168.1.21
+    hostname_override: k8s-demo-01
+    user: <user_name>
     role: [controlplane,etcd,worker]
 
-  - address: 192.168.1.72
-    hostname_override: k8s-master-02
-    user: user_name
+  - address: 192.168.1.22
+    hostname_override: k8s-demo-02
+    user: <user_name>
     role: [controlplane,etcd,worker]
 
-  - address: 192.168.1.73
-    hostname_override: k8s-master-03
-    user: user_name
+  - address: 192.168.1.23
+    hostname_override: k8s-demo-03
+    user: <user_name>
     role: [controlplane,etcd,worker]
 
 services:
@@ -178,12 +245,13 @@ dns:
 ingress:
   provider: nginx
 
+EOF
 ```
 
-将上面的文件保存到 ```rke-cluster-2.3.3-v1.16.3_071.yml```, 然后执行下面的命令开始部署 k8s.
+上面的命令将 rke cluster 文件保存到 ```./rke-cluster-2.3.3.yml```, 然后执行下面的命令开始部署 k8s.
 
 ```sh
-rke up --config ./rke-cluster-2.3.3-v1.16.3_071.yml
+rke up --config ./rke-cluster-2.3.3.yml
 ```
 
 这时控制台开始输出部署日志.
@@ -206,24 +274,70 @@ Finished building Kubernetes cluster successfully
 rke 会在执行目录中生成两个文件:
 
 ```sh
-rke-cluster-2.3.3-v1.16.3_071.rkestate
-kube_config_rke-cluster-2.3.3-v1.16.3_071.yml
+kube_config_rke-cluster-2.3.3.yml
+rke-cluster-2.3.3.rkestate
 ```
 
 其中 ```rkestate``` 文件用于通过 rke 工具管理 cluster, 在以后升级 cluster时回用到 ([参考](https://rancher.com/docs/rke/latest/en/installation/#save-your-files)).
-而 ```kube_config_rke-cluster-2.3.3-v1.16.3_071.yml``` 文件则用于通过 kubectl 操作 cluster.
+而 ```ube_config_rke-cluster-2.3.3.yml``` 文件则用于通过 kubectl 操作 cluster.
 例如下面的命令可以用于在部署完成后检查 cluster 的运行状况. 另外建议使用命令 ```kubectl get all -A``` 检查  cluster 中所有资源均已部署完毕并运行正常, 没有 pending 或 error 的资源. Pod 数量均达到预期.
 
 ```bash
-export KUBECONFIG=$(pwd)/kube_config_rke-cluster-2.3.3-v1.16.3_071.yml
+export KUBECONFIG=$(pwd)/kube_config_rke-cluster-2.3.3.yml
 kubectl get nodes
 
 NAME            STATUS   ROLES                      AGE   VERSION
-k8s-master-01   Ready    controlplane,etcd,worker   9h    v1.16.3
-k8s-master-02   Ready    controlplane,etcd,worker   9h    v1.16.3
-k8s-master-03   Ready    controlplane,etcd,worker   9h    v1.16.3
+k8s-demo-01   Ready    controlplane,etcd,worker   2m21s   v1.16.3
+k8s-demo-02   Ready    controlplane,etcd,worker   2m21s   v1.16.3
+k8s-demo-03   Ready    controlplane,etcd,worker   2m21s   v1.16.3
 
 kubectl get all -A
+# 主要检查 Pod 是否都处于 Running 状态, 有无部署失败的情况.
+NAMESPACE       NAME                                          READY   STATUS      RESTARTS   AGE
+ingress-nginx   pod/default-http-backend-c8f4dbb5c-v7nn8      1/1     Running     0          2m3s
+ingress-nginx   pod/nginx-ingress-controller-427g7            1/1     Running     0          2m3s
+ingress-nginx   pod/nginx-ingress-controller-sc58m            1/1     Running     0          2m3s
+ingress-nginx   pod/nginx-ingress-controller-xvzbs            1/1     Running     0          2m3s
+kube-system     pod/kube-dns-5b5497475f-pdv9j                 3/3     Running     0          2m13s
+kube-system     pod/kube-dns-5b5497475f-tlw2t                 3/3     Running     0          99s
+kube-system     pod/kube-dns-autoscaler-6b9b6bbcff-4vf2z      1/1     Running     0          2m12s
+kube-system     pod/kube-flannel-b6qht                        2/2     Running     0          2m18s
+kube-system     pod/kube-flannel-lbg7c                        2/2     Running     0          2m18s
+kube-system     pod/kube-flannel-s5ldh                        2/2     Running     0          2m18s
+kube-system     pod/metrics-server-6d454d5dd5-pvp7n           1/1     Running     0          2m8s
+kube-system     pod/rke-ingress-controller-deploy-job-nlspx   0/1     Completed   0          2m5s
+kube-system     pod/rke-kube-dns-addon-deploy-job-bg9xj       0/1     Completed   0          2m15s
+kube-system     pod/rke-metrics-addon-deploy-job-5498c        0/1     Completed   0          2m10s
+kube-system     pod/rke-network-plugin-deploy-job-drxdr       0/1     Completed   0          2m40s
+
+NAMESPACE       NAME                           TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)         AGE
+default         service/kubernetes             ClusterIP   10.43.0.1      <none>        443/TCP         3m31s
+ingress-nginx   service/default-http-backend   ClusterIP   10.43.230.1    <none>        80/TCP          2m3s
+kube-system     service/kube-dns               ClusterIP   10.43.0.10     <none>        53/UDP,53/TCP   2m13s
+kube-system     service/metrics-server         ClusterIP   10.43.43.195   <none>        443/TCP         2m8s
+
+NAMESPACE       NAME                                      DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+ingress-nginx   daemonset.apps/nginx-ingress-controller   3         3         3       3            3           <none>          2m3s
+kube-system     daemonset.apps/kube-flannel               3         3         3       3            3           <none>          2m18s
+
+NAMESPACE       NAME                                   READY   UP-TO-DATE   AVAILABLE   AGE
+ingress-nginx   deployment.apps/default-http-backend   1/1     1            1           2m3s
+kube-system     deployment.apps/kube-dns               2/2     2            2           2m13s
+kube-system     deployment.apps/kube-dns-autoscaler    1/1     1            1           2m13s
+kube-system     deployment.apps/metrics-server         1/1     1            1           2m8s
+
+NAMESPACE       NAME                                             DESIRED   CURRENT   READY   AGE
+ingress-nginx   replicaset.apps/default-http-backend-c8f4dbb5c   1         1         1       2m3s
+kube-system     replicaset.apps/kube-dns-5b5497475f              2         2         2       2m13s
+kube-system     replicaset.apps/kube-dns-autoscaler-6b9b6bbcff   1         1         1       2m13s
+kube-system     replicaset.apps/metrics-server-6d454d5dd5        1         1         1       2m8s
+
+NAMESPACE     NAME                                          COMPLETIONS   DURATION   AGE
+kube-system   job.batch/rke-ingress-controller-deploy-job   1/1           2s         2m5s
+kube-system   job.batch/rke-kube-dns-addon-deploy-job       1/1           3s         2m15s
+kube-system   job.batch/rke-metrics-addon-deploy-job        1/1           2s         2m10s
+kube-system   job.batch/rke-network-plugin-deploy-job       1/1           23s        2m40s
+
 ```
 
 确认 cluster 已正常运行后可以继续后面的步骤. 注意上面的 ```export KUBECONFIG=``` 命令只是临时使用，重新打开控制台会话将需要重新设置．
@@ -240,6 +354,15 @@ curl -L -o cert-manager-crd_0.9.yaml \
     https://raw.githubusercontent.com/jetstack/cert-manager/release-0.9/deploy/manifests/00-crds.yaml
 
 kubectl apply -f cert-manager-crd_0.9.yaml
+
+# 输出下面内容说明创建成功.
+customresourcedefinition.apiextensions.k8s.io/certificates.certmanager.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/certificaterequests.certmanager.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/challenges.certmanager.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/clusterissuers.certmanager.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/issuers.certmanager.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/orders.certmanager.k8s.io created
+
 ```
 
 在 k8s 中创建 cert-manager namespace 并标记禁用验证
@@ -318,9 +441,72 @@ grep "image: " ./cert-manager/templates/deployment.yaml
 
 ```shell
 kubectl apply -R -f ./cert-manager
+
+# 输出如下内容说明部署完成
+deployment.apps/cert-manager-cainjector created
+clusterrole.rbac.authorization.k8s.io/cert-manager-cainjector created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-cainjector created
+serviceaccount/cert-manager-cainjector created
+apiservice.apiregistration.k8s.io/v1beta1.admission.certmanager.k8s.io created
+deployment.apps/cert-manager-webhook created
+certificate.certmanager.k8s.io/cert-manager-webhook-webhook-tls created
+certificate.certmanager.k8s.io/cert-manager-webhook-ca created
+issuer.certmanager.k8s.io/cert-manager-webhook-ca created
+issuer.certmanager.k8s.io/cert-manager-webhook-selfsign created
+clusterrole.rbac.authorization.k8s.io/cert-manager-webhook:webhook-requester created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-webhook:auth-delegator created
+rolebinding.rbac.authorization.k8s.io/cert-manager-webhook:webhook-authentication-reader created
+service/cert-manager-webhook created
+serviceaccount/cert-manager-webhook created
+validatingwebhookconfiguration.admissionregistration.k8s.io/cert-manager-webhook created
+deployment.apps/cert-manager created
+clusterrole.rbac.authorization.k8s.io/cert-manager-controller-ingress-shim created
+clusterrole.rbac.authorization.k8s.io/cert-manager-controller-orders created
+clusterrole.rbac.authorization.k8s.io/cert-manager-controller-clusterissuers created
+clusterrole.rbac.authorization.k8s.io/cert-manager-view created
+clusterrole.rbac.authorization.k8s.io/cert-manager-leaderelection created
+clusterrole.rbac.authorization.k8s.io/cert-manager-controller-certificates created
+clusterrole.rbac.authorization.k8s.io/cert-manager-edit created
+clusterrole.rbac.authorization.k8s.io/cert-manager-controller-challenges created
+clusterrole.rbac.authorization.k8s.io/cert-manager-controller-issuers created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-controller-issuers created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-controller-clusterissuers created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-controller-ingress-shim created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-controller-orders created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-controller-challenges created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-controller-certificates created
+clusterrolebinding.rbac.authorization.k8s.io/cert-manager-leaderelection created
+serviceaccount/cert-manager created
+
 ```
 
-可能需要数分钟 cert manager的组件才会完全启动. 可以通过 ```kubectl get all -A``` 命令查看各资源的部署情况.
+可能需要数分钟 cert manager的组件才会完全启动. 可以通过 ```kubectl get all -n cert-manager``` 命令查看各资源的部署情况.
+
+确保 cert manager的相关资源处于运行状态
+
+```shell
+kubectl get all -n cert-manager
+
+NAME                                           READY   STATUS    RESTARTS   AGE
+pod/cert-manager-6b6c7665b7-xd5qx              1/1     Running   0          7m43s
+pod/cert-manager-cainjector-6cd5b7dfc8-8bnq4   1/1     Running   0          7m44s
+pod/cert-manager-webhook-6c799c657f-545mb      1/1     Running   0          7m44s
+
+NAME                           TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE
+service/cert-manager-webhook   ClusterIP   10.43.34.223   <none>        443/TCP   7m44s
+
+NAME                                      READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/cert-manager              1/1     1            1           7m44s
+deployment.apps/cert-manager-cainjector   1/1     1            1           7m45s
+deployment.apps/cert-manager-webhook      1/1     1            1           7m45s
+
+NAME                                                 DESIRED   CURRENT   READY   AGE
+replicaset.apps/cert-manager-6b6c7665b7              1         1         1       7m44s
+replicaset.apps/cert-manager-cainjector-6cd5b7dfc8   1         1         1       7m45s
+replicaset.apps/cert-manager-webhook-6c799c657f      1         1         1       7m45s
+
+
+```
 
 # 下载, 配置和部署 rancher
 
@@ -334,25 +520,92 @@ helm repo update
 helm fetch --version 2.3.3 rancher-stable/rancher
 ```
 
-执行下面的命令解包  chart , 指定  rancher hostname 并替换镜像．
+执行下面的命令解包  chart , 指定 rancher namespace 并替换镜像．
 
 ```shell
 helm template rancher \
   ./rancher-2.3.3.tgz \
   --output-dir . \
   --namespace cattle-system \
-  --set hostname=rancher.fshome.net \
+  --set hostname=k8s-demo.fshome.net \
   --set rancherImage=$YOUR_IMAGE_REGISTRY/library/rancher/rancher
 ```
 
-创建 K8S namespace 
+注意这里的hostname 我们指定了 LB 的域名, 并且不能在这里用 LB 的 IP地址,否则在部署时会提示下面的错误.
+
+```shell
+The Ingress "rancher" is invalid: spec.rules[0].host: Invalid value: "xxx.xxx.xxx.xxx": must be a DNS name, not an IP address
+```
+
+创建 K8S namespace, 部署 rancher
 
 ```shell
 kubectl create namespace cattle-system
-```
-
-部署 rancher
-
-```shell
 kubectl --namespace=cattle-system apply -R -f ./rancher
 ```
+
+通过命令 ```kubectl get all -n cattle-system``` 检查部署情况.
+
+```shell
+kubectl get all -n cattle-system
+
+# 输出如下内容说明部署成功完成
+NAME                           READY   STATUS    RESTARTS   AGE
+pod/rancher-75846dbdd6-9gsht   1/1     Running   0          5m39s
+pod/rancher-75846dbdd6-bxrp9   1/1     Running   0          5m39s
+pod/rancher-75846dbdd6-pzcrp   1/1     Running   0          5m39s
+
+NAME              TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)   AGE
+service/rancher   ClusterIP   10.43.23.48   <none>        80/TCP    5m39s
+
+NAME                      READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/rancher   3/3     3            3           5m39s
+
+NAME                                 DESIRED   CURRENT   READY   AGE
+replicaset.apps/rancher-75846dbdd6   3         3         3       5m39s
+
+```
+
+数分钟后, 可以通过浏览器访问 https://k8s-demo.fshome.net 首次登录 rancher.
+由于我们使用了 cert-manager自动生成的SSL证书,浏览器会提示站点不安全, 忽略并继续前往即可.
+
+首次登录可以看到提示修改 admin 密码的提示:
+
+![Login](./images/racnher_login_first_time.png)
+
+输入初始密码后, 提示确认 server url, 如下图所示, 这里不用修改,保存即可.
+
+![Server URL](./images/rancher_login_set_server_url.png)
+
+完成后就进入 Rancher 的主页面了, 可以看到这里有一个警告提示等待设置 server url. 我们上一步就是设置这个 url, 进入 Global Settings 里面也可以看到 server url  已经设置. 
+
+![Cluster with error](./images/intial_cluster_error_msg.png)
+
+这时我们只需修改一下 cluster 的名字, 比如从 local 改为 k8s-demo, 这个错误提示就消失了.
+
+![Cluster without error](./images/update_cluster_name_error_go_away.png)
+
+接下来打开 Global 菜单下的 Cluster 名字对应的 System Project
+
+![System Project](./images/go_to_cluster_system_project.png)
+
+可以看到 cattle-cluster-agent Work loads 没有部署成功.
+
+![Cattle Cluster Agent Error](./images/cattle-cluster-agent_not_working.png)
+
+这是由于 cattle-cluster-agent POD 无法解析 server url 对应的域名, 所以需要手动为这个 POD 添加一个 host alias. 可以通过 kubectl 命令,也可以在 Rancher UI 上 Update 这个 POD.
+
+下面这个命令执行后, 可以看到 POD 稍等片刻就部署正常了.
+
+```shell
+kubectl -n cattle-system \
+  patch deployments cattle-cluster-agent \
+  --patch '{"spec": {"template": {"spec": {"hostAliases": [{"hostnames":["k8s-demo.fshome.net"],"ip": "192.168.1.20"}]}}}}'
+```
+
+![Cattle Cluster Agent Normal](./images/cattle-cluster-agent_is_working.png)
+
+至此, Rancher K8S Cluster 的 HA 部署就完成了. 赶快去体验 Rancher 的世界吧.
+
+谢谢观赏!
+:)
