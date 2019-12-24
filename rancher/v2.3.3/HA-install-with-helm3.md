@@ -1,5 +1,5 @@
 Rancher  HA 安装手册 (v2.3.3)
-===
+=
 
 这篇手册详细介绍如何在内网环境(Air gapped / Offline)中安装 HA (高可用) 模式的 Rancher Cluster. 在开始前请确保已经部署了内网镜像仓库 (推荐使用[harbor](https://github.com/goharbor/harbor)).
 
@@ -10,6 +10,7 @@ Rancher  HA 安装手册 (v2.3.3)
 * rancher (2.3.3)
 * cert-manager (0.9.1)
 * helm (3.0.2)
+* nginx (1.15.11)
 
 基本步骤包括:
 
@@ -21,7 +22,7 @@ Rancher  HA 安装手册 (v2.3.3)
 * 下载, 配置和部署 cert manager
 * 下载, 配置和部署 rancher
 
-## 准备节点(物理机/虚拟机)
+# 准备节点(物理机/虚拟机)
 
 本手册使用下面的节点来部署, 请根据实际情况自行调整.
 
@@ -31,9 +32,9 @@ Rancher  HA 安装手册 (v2.3.3)
 192.168.1.73 k8s-master-03
 ```
 
-为确保各节点可以互相访问, 将节点和对应的 IP 添加到 ```/etc/hosts ```中
+为确保各节点可以互相访问, 将节点和对应的 IP 添加到 ```/etc/hosts ``` 中
 
-## 配置节点, 安装软件
+# 配置节点, 安装软件
 
 请参考 Rancher 官方文档中的最佳实践进行配置
 
@@ -64,9 +65,10 @@ ssh user_name@k8s-master-02
 ssh user_name@k8s-master-03
 ```
 
-## 准备相关工具
+# 准备相关工具
 
 下载下列工具到执行部署的节点上 (```k8s-master-01```)
+
 * rke (1.0.0)
 * kubectl (1.16.3)
 * helm (3.0.2)
@@ -74,7 +76,7 @@ ssh user_name@k8s-master-03
 ```sh
 # Download and install RKE tool https://github.com/rancher/rke/releases/tag/v1.0.0
 curl -L -o  rke_linux-amd64 \
-    https://github.com/rancher/rke/releases/download/v1.0.0/rke_linux-amd64    
+    https://github.com/rancher/rke/releases/download/v1.0.0/rke_linux-amd64
 chmod +x rke_linux-amd64
 sudo mv rke_linux-amd64 /usr/local/bin/rke
 
@@ -90,13 +92,13 @@ tar -zxvf helm-v3.0.2-linux-amd64.tar.gz
 sudo mv linux-amd64/helm /usr/local/bin/helm
 ```
 
-如需使用socks5代理,可以添加如下参数:
+如需使用socks5代理,可以添加参数 ```--socks5 PROXY_IP:PORT``` 如下面的命令所示:
 
 ```sh
-curl -L -o FILENAME URL --socks5 IP:PORT
+curl -L -o FILENAME URL --socks5 PROXY_IP:PORT
 ```
 
-## 准备相关镜像并push到内网镜像仓库中
+# 准备相关镜像并push到内网镜像仓库中
 
 参考官方文档中关于准备[离线镜像](https://docs.rancher.cn/rancher2x/installation/helm-ha-install/offline/prepare-private-registry.html#_1-%E5%87%86%E5%A4%87%E6%96%87%E4%BB%B6)的部分.
 
@@ -104,11 +106,13 @@ curl -L -o FILENAME URL --socks5 IP:PORT
 
 由于我们使用了 harbor 作为私有仓库,它暂时不支持自动创建项目 (镜像目录), 所以这里将镜像导入到 私有仓库的 library 项目 (目录) 中, 后面部分也都使用这一镜像前缀.
 
+后面的私仓均使用 ```$YOUR_IMAGE_REGISTRY``` 代替 ```hub.fshome.net```
+
 ```sh
-./transfer-images.sh rancher-images.txt hub.fshome.net/library
+./transfer-images.sh rancher-images.txt $YOUR_IMAGE_REGISTRY/library
 ```
 
-## 创建 RKE k8s Cluster 配置, 部署 k8s Cluster
+# 创建 RKE k8s Cluster 配置, 部署 k8s Cluster
 
 RKE 工具使用一个 cluster yaml 文件了来指导部署 k8s cluster, 下面是本例中的 cluster 配置文件, 更多配置可以参考 Rancher [官网示例](https://rancher.com/docs/rke/latest/en/example-yamls/).
 
@@ -160,7 +164,7 @@ services:
 # Use `mode: none` to disable authorization
 authorization:
   mode: rbac
-    
+
 # There are several network plug-ins that work, but we default to canal
 network:
   plugin: flannel
@@ -168,7 +172,7 @@ network:
 # Specify DNS provider (coredns or kube-dns)
 dns:
   provider: kube-dns
-    
+
 # Currently only nginx ingress provider is supported.
 # # To disable ingress controller, set `provider: none`
 ingress:
@@ -200,10 +204,12 @@ Finished building Kubernetes cluster successfully
 ```
 
 rke 会在执行目录中生成两个文件:
+
 ```sh
 rke-cluster-2.3.3-v1.16.3_071.rkestate
 kube_config_rke-cluster-2.3.3-v1.16.3_071.yml
 ```
+
 其中 ```rkestate``` 文件用于通过 rke 工具管理 cluster, 在以后升级 cluster时回用到 ([参考](https://rancher.com/docs/rke/latest/en/installation/#save-your-files)).
 而 ```kube_config_rke-cluster-2.3.3-v1.16.3_071.yml``` 文件则用于通过 kubectl 操作 cluster.
 例如下面的命令可以用于在部署完成后检查 cluster 的运行状况. 另外建议使用命令 ```kubectl get all -A``` 检查  cluster 中所有资源均已部署完毕并运行正常, 没有 pending 或 error 的资源. Pod 数量均达到预期.
@@ -222,33 +228,131 @@ kubectl get all -A
 
 确认 cluster 已正常运行后可以继续后面的步骤. 注意上面的 ```export KUBECONFIG=``` 命令只是临时使用，重新打开控制台会话将需要重新设置．
 
-## 下载, 配置和部署 cert manager
+# 下载, 配置和部署 cert manager
+
 通过 helm 可以在线安装 cert-manager, 但如果其镜像由于网络限制无法直接拉取，可以先先下载 chart 包，然后基于 chart 包生成含有私仓镜像路径的 kubectl 部署文件．
 执行下面的命令获取 cert manager chart 包，这里我们使用 v0.9.1 版本，经测试与 rancher 2.3.3 工作正常．更低或者更高的版本可能出现部署错误．
 
+下载并部署 cert manager 的 CRD (Customerized Resource Definition) 这一步必须先做.
+
 ```shell
-# 下载并部署 cert manager 的 CRD (Customerized Resource Definition) 这一步必须先做.
 curl -L -o cert-manager-crd_0.9.yaml \
     https://raw.githubusercontent.com/jetstack/cert-manager/release-0.9/deploy/manifests/00-crds.yaml
 
-# 部署 CRD
 kubectl apply -f cert-manager-crd_0.9.yaml
+```
 
-# 在 k8s 中创建 cert-manager namespace
+在 k8s 中创建 cert-manager namespace 并标记禁用验证
+
+```shell
 kubectl create namespace cert-manager
-# 标记 namespace cert-manager 禁用验证
 kubectl label namespace cert-manager certmanager.k8s.io/disable-validation=true
+```
 
-# 添加 repo 并获取 cert manager 的 chart 包, 也可以从其他可以联网的机器上下载后复制到当前节点.
+获取 cert-manager chart 包,  也可以从其他可以联网的机器上下载后复制到部署节点上.
+
+```shell
+# 添加 jetstack charts repo 
 helm repo add jetstack https://charts.jetstack.io
+
+# 更新 helm repo
 helm repo update
+
+# 获取 v0.9.1版本的 cert-manager chart 包到本地
 helm fetch --version v0.9.1 jetstack/cert-manager
+```
 
-# 根据
-helm template cert-manager ./cert-manager-v0.9.1.tgz --output-dir . \
- --namespace cert-manager \
- --set image.repository=$YOUR_IMAGE_REGISTRY/quay.io/jetstack/cert-manager-controller \
- --set cainjector.image.repository=$YOUR_IMAGE_REGISTRY/quay.io/jetstack/cert-manager-cainjector \
- --set webhook.image.repository=$YOUR_IMAGE_REGISTRY/quay.io/jetstack/cert-manager-webhook
+解包 cert-manager-v0.9.1.tgz 可以看到其中 deployment.yaml文件中包含的 image. 事先通过可以联网的机器将其拉到私仓中.
 
+```shell
+quay.io/jetstack/cert-manager-controller:v0.9.1
+quay.io/jetstack/cert-manager-cainjector:v0.9.1
+quay.io/jetstack/cert-manager-webhook:v0.9.1
+# Pull, Tag and Push ==>
+$YOUR_IMAGE_REGISTRY/library/quay.io/jetstack/cert-manager-controller:v0.9.1
+$YOUR_IMAGE_REGISTRY/library/quay.io/jetstack/cert-manager-cainjector:v0.9.1
+$YOUR_IMAGE_REGISTRY/library/quay.io/jetstack/cert-manager-webhook:v0.9.1
+```
+
+执行下面的命令将 chart 解包并将镜像替换为本地私仓的路径, 注意镜像名称后面不要带版本 tag, helm 命令在解包时会自动通过 chart 中包含的版本信息补全镜像 tag.
+
+```shell
+helm template cert-manager \
+  ./cert-manager-v0.9.1.tgz \
+  --output-dir . \
+  --namespace cert-manager \
+  --set image.repository=$YOUR_IMAGE_REGISTRY/library/quay.io/jetstack/cert-manager-controller \
+  --set cainjector.image.repository=$YOUR_IMAGE_REGISTRY/library/quay.io/jetstack/cert-manager-cainjector \
+  --set webhook.image.repository=$YOUR_IMAGE_REGISTRY/library/quay.io/jetstack/cert-manager-webhook  
+```
+
+如果命令正确执行, 会输出类似下面的文本内容.
+
+```text
+wrote ./cert-manager/charts/cainjector/templates/serviceaccount.yaml
+wrote ./cert-manager/charts/webhook/templates/serviceaccount.yaml
+wrote ./cert-manager/templates/serviceaccount.yaml
+wrote ./cert-manager/charts/cainjector/templates/rbac.yaml
+wrote ./cert-manager/charts/webhook/templates/rbac.yaml
+wrote ./cert-manager/templates/rbac.yaml
+...
+wrote ./cert-manager/charts/cainjector/templates/deployment.yaml
+wrote ./cert-manager/charts/webhook/templates/deployment.yaml
+wrote ./cert-manager/templates/deployment.yaml
+wrote ./cert-manager/charts/webhook/templates/apiservice.yaml
+wrote ./cert-manager/charts/webhook/templates/rbac.yaml
+wrote ./cert-manager/charts/webhook/templates/pki.yaml
+...
+wrote ./cert-manager/charts/webhook/templates/validating-webhook.yaml
+```
+
+注意检查三个名为 ```deployment.yaml``` 的文件,确保其中的镜像替换正确.
+
+```shell
+grep "image: " ./cert-manager/charts/cainjector/templates/deployment.yaml
+grep "image: " ./cert-manager/charts/webhook/templates/deployment.yaml
+grep "image: " ./cert-manager/templates/deployment.yaml
+```
+
+如以上步骤正常完成, 接下来可以执行命令部署 cert-manager.
+
+```shell
+kubectl apply -R -f ./cert-manager
+```
+
+可能需要数分钟 cert manager的组件才会完全启动. 可以通过 ```kubectl get all -A``` 命令查看各资源的部署情况.
+
+# 下载, 配置和部署 rancher
+
+接下来我们可以开始在这个通过 RKE 安装的 K8S cluster 中部署 Rancher 2.3.3.
+
+首先通过 helm 获取 rancher 2.3.3 版本的 chart 包.
+
+```shell
+helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
+helm repo update
+helm fetch --version 2.3.3 rancher-stable/rancher
+```
+
+执行下面的命令解包  chart , 指定  rancher hostname 并替换镜像．
+
+```shell
+helm template rancher \
+  ./rancher-2.3.3.tgz \
+  --output-dir . \
+  --namespace cattle-system \
+  --set hostname=rancher.fshome.net \
+  --set rancherImage=$YOUR_IMAGE_REGISTRY/library/rancher/rancher
+```
+
+创建 K8S namespace 
+
+```shell
+kubectl create namespace cattle-system
+```
+
+部署 rancher
+
+```shell
+kubectl --namespace=cattle-system apply -R -f ./rancher
 ```
